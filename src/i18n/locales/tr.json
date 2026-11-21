@@ -12,7 +12,9 @@
     "stellar": "Stellar",
     "skipToContent": "Ana içeriğe geç",
     "pause": "Duraklat",
-    "resume": "Devam et"
+    "resume": "Devam et",
+    "copy": "Panoya kopyala",
+    "copied": "Kopyalandı!"
   },
   "nav": {
     "createLock": "Kilit Oluştur",
@@ -172,6 +174,18 @@
     "noBeneficiary": "Yararlanıcı olduğunuz kilit yok",
     "noBeneficiaryDesc": "Başkaları tarafından sizin için oluşturulan kilitler burada görünecektir.",
     "createLock": "Kilit Oluştur",
+    "clearFilters": "Filtreleri temizle",
+    "noResults": "Filtrelerinizle eşleşen kilit yok",
+    "noResultsDesc": "Arama veya filtre ölçütlerinizi ayarlamayı deneyin.",
+    "loadMore": "Daha fazla yükle",
+    "loadingMore": "Daha fazla yükleniyor…",
+    "showingCount": "{{shown}} / {{total}} kilit gösteriliyor",
+    "selectAll": "Tümünü seç",
+    "deselectAll": "Seçimi temizle",
+    "selectedCount": "{{count}} seçildi",
+    "batchWithdraw": "Seçilenleri çek",
+    "batchExtend": "Seçilenleri uzat",
+    "batchActions": "Toplu işlemler"
     "pageTitle": "Kilitlerim | StellarLock",
     "pageDescription": "StellarLock'ta kilitli token ve LP pozisyonlarınızı yönetin ve çekin."
   },
@@ -218,6 +232,29 @@
     "vestingClaimable": "Talep edilebilir",
     "lockDetails": "Kilit Ayrıntıları",
     "projectLogoAlt": "Proje logosu",
+    "copyLockId": "Kilit ID'sini kopyala",
+    "copyShareLink": "Paylaşım bağlantısını kopyala",
+    "viewOnStellarExpert": "Stellar Expert'te görüntüle",
+    "transactionHash": "İşlem hash'i",
+    "createdAt": "Oluşturulma tarihi",
+    "lastExtended": "Son uzatılma",
+    "extensionCount": "Uzatma sayısı",
+    "withdrawable": "Çekilebilir",
+    "withdrawableHint": "Şu anda çekime hazır token miktarı.",
+    "claimableHint": "Hakediş planından şu anda talep edilebilir token miktarı.",
+    "withdrawConfirmTitle": "Çekimi onayla",
+    "withdrawConfirmDesc": "Kilitli tokenleri yararlanıcı adresine çekmek üzeresiniz. Bu işlem geri alınamaz.",
+    "extendConfirmTitle": "Uzatmayı onayla",
+    "extendConfirmDesc": "Kilit açma tarihini {{date}} olarak değiştirmek üzeresiniz. Bu işlem geri alınamaz.",
+    "transferConfirmTitle": "Devri onayla",
+    "transferConfirmDesc": "Çekim haklarını {{address}} adresine devretmek üzeresiniz. Bu işlem geri alınamaz.",
+    "cancel": "İptal",
+    "confirm": "Onayla",
+    "processing": "İşleniyor…",
+    "vestingNotStarted": "Hakediş henüz başlamadı",
+    "vestingComplete": "Hakediş tamamlandı",
+    "fullyWithdrawn": "Tamamen çekildi",
+    "status": "Durum"
     "pageTitle": "Kilit #{{id}} — {{amount}} {{symbol}}, {{date}} tarihine kadar kilitli | StellarLock",
     "pageDescription": "Kilit #{{id}}: {{amount}} {{symbol}}, StellarLock'ta {{date}} tarihine kadar kilitli."
   },
@@ -460,6 +497,7 @@
     "wrongNetwork": {
       "title": "Yanlış Ağ",
       "message": "Cüzdanınız yanlış ağa bağlı.",
+      "recovery": "Freighter ayarlarında doğru ağa geçin."
       "recovery": "Freighter ayarlarında doğru ağa geçin."
     },
     "lockDurationTooShort": {
