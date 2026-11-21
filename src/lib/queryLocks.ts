@@ -20,7 +20,6 @@ import {
   getLocksByCreator,
   getLocksByBeneficiary,
   getLockCountByCreator,
-  getLockCountByBeneficiary,
   getLockCountByToken,
 } from "@/lib/token-locker"
 import {
@@ -28,18 +27,20 @@ import {
   getLpLocksByCreator,
   getLpLocksByBeneficiary,
   getLpLockCountByCreator,
-  getLpLockCountByBeneficiary,
 } from "@/lib/lp-locker"
 import { isArchivedError } from "@/lib/stellar"
 import {
   fetchIndexerStats,
   fetchIndexerLocksForToken,
+  fetchIndexerLockById,
   mapIndexerLocks,
+  mapIndexerLock,
   mapIndexerLocksPageToSummary,
   type IndexerStatsDTO,
 } from "@/lib/indexer-client"
 import { fetchPricesBatch } from "@/lib/prices"
 import { getOnChainTokenMeta } from "@/lib/token-metadata"
+import { CONTRACTS } from "@/lib/stellar"
 
 // ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -76,7 +77,27 @@ function buildArchivedStub(id: string, kind: "token" | "lp"): Lock {
 // ── Single-lock queries ────────────────────────────────────────────────────────
 
 /**
+ * Fall back to the lock indexer's archival record when a direct RPC lookup
+ * comes back empty (#1084). Withdrawn locks get bumped to a 30-day TTL on
+ * the contract (`WITHDRAWN_BUMP`); once that lapses `get_lock` returns `None`
+ * forever even though the lock's final state is still meaningful history.
+ * Returns null if the indexer has no record either — genuinely not found.
+ */
+async function queryArchivedLock(contractId: string, id: string): Promise<Lock | null> {
+  const dto = await fetchIndexerLockById(`${contractId}:${id}`)
+  if (!dto) return null
+  const lock = await mapIndexerLock(dto)
+  const [enriched] = await withUsdValues([lock])
+  return { ...enriched, archived: true }
+}
+
+/**
  * Fetch a single token lock by id, enriched with USD value.
+ * Returns null if the lock does not exist on-chain or in the indexer archive.
+ */
+export async function queryTokenLock(id: string): Promise<Lock | null> {
+  const raw = await getLock(id)
+  if (!raw) return queryArchivedLock(CONTRACTS.tokenLocker, id)
  * Returns null if the lock does not exist on-chain.
  * Returns a stub with status "archived" when the on-chain entry has expired
  * from active ledger storage and needs a RestoreFootprint before it is usable.
@@ -98,6 +119,11 @@ export async function queryTokenLock(id: string): Promise<Lock | null> {
 
 /**
  * Fetch a single LP lock by id, enriched with USD value.
+ * Returns null if the lock does not exist on-chain or in the indexer archive.
+ */
+export async function queryLpLock(id: string): Promise<Lock | null> {
+  const raw = await getLpLock(id)
+  if (!raw) return queryArchivedLock(CONTRACTS.lpLocker, id)
  * Returns null if the lock does not exist on-chain.
  * Returns a stub with status "archived" when the on-chain entry has expired.
  */
@@ -165,6 +191,14 @@ interface UserLocks {
  * swallowed (the entry will appear in the detail page stub instead).
  */
 export async function queryMyLocks(address: string, offset = 0, limit = 50): Promise<UserLocks> {
+  // Note: there's no on-chain count for "beneficiary locks excluding
+  // self-created ones", so totalReceived below is derived from the filtered
+  // `received` list instead of a separate ByBeneficiary count call.
+  const [tCreated, lpCreated, tReceived, lpReceived, tCreatedCount, lpCreatedCount] = await Promise.all([
+    getLocksByCreator(address, offset, limit),
+    getLpLocksByCreator(address, offset, limit),
+    getLocksByBeneficiary(address, offset, limit),
+    getLpLocksByBeneficiary(address, offset, limit),
   async function safeList<T>(fn: () => Promise<T[]>): Promise<T[]> {
     try {
       return await fn()
@@ -190,8 +224,6 @@ export async function queryMyLocks(address: string, offset = 0, limit = 50): Pro
     safeList(() => getLpLocksByBeneficiary(address, offset, limit)),
     getLockCountByCreator(address),
     getLpLockCountByCreator(address),
-    getLockCountByBeneficiary(address),
-    getLpLockCountByBeneficiary(address),
   ])
 
   const allLocks = [...tCreated, ...lpCreated, ...tReceived, ...lpReceived]
@@ -209,7 +241,13 @@ export async function queryMyLocks(address: string, offset = 0, limit = 50): Pro
     created,
     received,
     totalCreated: tCreatedCount + lpCreatedCount,
-    totalReceived: tReceivedCount + lpReceivedCount,
+    // `received` above excludes locks the address created itself (the
+    // "Received" tab never shows those rows), so the count must come from
+    // the same filtered list — otherwise the tab badge/pagination total
+    // disagrees with what's actually rendered. The raw on-chain
+    // `ByBeneficiary` index length (tReceivedCount + lpReceivedCount) still
+    // includes self-locks and must not be used here.
+    totalReceived: received.length,
   }
 }
 

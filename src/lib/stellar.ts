@@ -55,6 +55,11 @@ const POLL_INTERVAL_MS = 1500
 const MAX_CONCURRENT = 5
 const MAX_RETRIES = 3
 const CACHE_TTL_MS = 10_000
+// Upper bound on the response cache so keys that are written once and never
+// read again (e.g. one-off lock lookups) can't grow the Map forever over a
+// long Explorer/Discover session. Expired entries are also swept on every
+// write, rather than only being skipped-over on read.
+const CACHE_MAX_ENTRIES = 200
 // Issue #1075: short-lived cache for cost estimates — long enough to dedupe a
 // burst of identical-args calls (e.g. React re-renders), short enough that the
 // estimate never goes stale while the user is actively editing the form.
@@ -99,6 +104,35 @@ class RpcClient {
 
   getServer(): SorobanRpc.Server {
     return this.server
+  }
+
+  get cacheSize(): number {
+    return this.cache.size
+  }
+
+  // Removes every entry whose TTL has already lapsed. Expiry was previously
+  // only checked on read, so a key that's written once and never read again
+  // (a common pattern for one-off lock-detail lookups) would sit in the Map
+  // forever — this runs on every write instead, so it can't accumulate.
+  private evictExpired(): void {
+    const now = Date.now()
+    for (const [key, entry] of this.cache) {
+      if (entry.expiry <= now) {
+        this.cache.delete(key)
+      }
+    }
+  }
+
+  // Backstop against unbounded growth even when nothing has expired yet
+  // (e.g. many distinct short-TTL keys written in quick succession). Map
+  // preserves insertion order, so the oldest-written entries are evicted
+  // first — a simple FIFO/LRU-ish cap, not a strict LRU.
+  private enforceMaxSize(): void {
+    while (this.cache.size > CACHE_MAX_ENTRIES) {
+      const oldestKey = this.cache.keys().next().value
+      if (oldestKey === undefined) break
+      this.cache.delete(oldestKey)
+    }
   }
 
   private async withConcurrencyLimit<T>(fn: () => Promise<T>): Promise<T> {
@@ -173,6 +207,10 @@ class RpcClient {
 
     const promise = this.retrySimulate(tx)
       .then((data) => {
+        if (cacheTtlMs > 0) {
+          this.evictExpired()
+          this.cache.set(key, { data, expiry: Date.now() + cacheTtlMs })
+          this.enforceMaxSize()
         if (gen === this.generation) {
           if (cacheTtlMs > 0) {
             this.cache.set(key, { data, expiry: Date.now() + cacheTtlMs })
@@ -246,6 +284,12 @@ function getClient(): RpcClient {
 // Invalidate read cache after mutations (create, withdraw, extend)
 export function invalidateRpcCache(): void {
   getClient().invalidateCache()
+}
+
+// Exposed for tests/diagnostics: current size of the response cache, so
+// growth over a long session can be asserted to stay bounded.
+export function getRpcCacheSize(): number {
+  return getClient().cacheSize
 }
 
 function simError(result: unknown): string {
