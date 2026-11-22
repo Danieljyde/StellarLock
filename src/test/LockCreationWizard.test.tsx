@@ -21,13 +21,9 @@ vi.mock("@/hooks/WalletProvider", () => ({
   WalletProvider: ({ children }: { children: ReactNode }) => children,
 }))
 
+const mockUseTokenBalanceSWR = vi.fn()
 vi.mock("@/hooks/useTokenBalanceSWR", () => ({
-  useTokenBalanceSWR: () => ({
-    balance: null,
-    isLoading: false,
-    isRevalidating: false,
-    revalidate: vi.fn(),
-  }),
+  useTokenBalanceSWR: (...args: unknown[]) => mockUseTokenBalanceSWR(...args),
 }))
 
 vi.mock("@/lib/token-locker", () => ({
@@ -66,6 +62,14 @@ describe("LockCreationWizard", () => {
   beforeEach(() => {
     vi.clearAllMocks()
     sessionStorage.clear()
+    mockUseTokenBalanceSWR.mockReturnValue({
+      balance: null,
+      decimals: null,
+      isLoading: false,
+      isRevalidating: false,
+      refetch: vi.fn(),
+      clear: vi.fn(),
+    })
   })
 
   it("renders step 1 with both lock type options", () => {
@@ -219,5 +223,24 @@ describe("LockCreationWizard", () => {
         expect.any(Function),
       )
     })
+  })
+
+  it("shows the balance scaled by the token's decimals on step 2 (#1060)", async () => {
+    mockUseTokenBalanceSWR.mockReturnValue({
+      balance: 2_500_000_000_000_000_000n,
+      decimals: 18,
+      isLoading: false,
+      isRevalidating: false,
+      refetch: vi.fn(),
+      clear: vi.fn(),
+    })
+    const user = userEvent.setup()
+    render(<LockCreationWizard />)
+
+    // Step 1 (token lock) -> Step 2, where the balance is shown.
+    await user.click(screen.getByRole("button", { name: /^next$/i }))
+
+    // 2.5 tokens at 18 decimals; the old hardcoded /1e7 would show 250,000,000,000.
+    expect(await screen.findByText("Balance: 2.5")).toBeInTheDocument()
   })
 })

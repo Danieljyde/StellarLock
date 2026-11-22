@@ -11,6 +11,7 @@ import { useTokenBalanceSWR } from "@/hooks/useTokenBalanceSWR"
 import { isValidStellarContractAddress, isValidStellarAddress } from "@/lib/stellar"
 import { createTokenLock } from "@/lib/token-locker"
 import { createLpLock } from "@/lib/lp-locker"
+import { fromRawUnits } from "@/lib/vesting"
 import { sanitizeError } from "@/lib/error-sanitizer"
 import type { StructuredError } from "@/lib/errors"
 import type { Dex } from "@/types/lock"
@@ -315,8 +316,10 @@ function Step2({ state, updateState }: { state: WizardState; updateState: (updat
   const validTokenAddress = isValidStellarContractAddress(state.tokenAddress.trim())
     ? state.tokenAddress.trim()
     : undefined
-  const { balance: balanceStroops } = useTokenBalanceSWR(validTokenAddress, address ?? null)
-  const balance = balanceStroops !== null ? Number(balanceStroops) / 1e7 : null
+  const { balance: balanceStroops, decimals } = useTokenBalanceSWR(validTokenAddress, address ?? null)
+  // Scale by the token's real decimals via the shared helper used by the simple
+  // form, instead of assuming 7 (#1060).
+  const balance = balanceStroops !== null && decimals != null ? fromRawUnits(balanceStroops, decimals) : null
 
   return (
     <div>

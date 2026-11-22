@@ -4,6 +4,8 @@
 #![allow(clippy::too_many_arguments)]
 
 #[cfg(test)]
+mod prop_tests;
+#[cfg(test)]
 mod tests;
 
 use soroban_sdk::{

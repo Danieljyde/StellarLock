@@ -51,6 +51,7 @@ describe("useTokenBalanceSWR", () => {
     const { result } = renderHook(() => useTokenBalanceSWR(undefined, OWNER))
 
     expect(result.current.balance).toBeNull()
+    expect(result.current.decimals).toBeNull()
     expect(result.current.isLoading).toBe(false)
     expect(mockGetTokenBalance).not.toHaveBeenCalled()
   })
@@ -76,6 +77,7 @@ describe("useTokenBalanceSWR", () => {
 
     // 12.5 tokens -> 125_000_000 stroops (1e7 factor)
     expect(result.current.balance).toBe(125_000_000n)
+    expect(result.current.decimals).toBe(7)
     expect(mockGetTokenBalance).toHaveBeenCalledWith(TOKEN, OWNER)
   })
 
@@ -91,6 +93,7 @@ describe("useTokenBalanceSWR", () => {
     // Correct at 18 decimals: 2_500_000_000_000_000_000n.
     // The old hardcoded-1e7 bug would have produced 25_000_000n instead.
     expect(result.current.balance).toBe(2_500_000_000_000_000_000n)
+    expect(result.current.decimals).toBe(18)
   })
 
   it("serves a fresh cached value immediately without revalidating", async () => {
@@ -105,6 +108,7 @@ describe("useTokenBalanceSWR", () => {
     const { result: result2 } = renderHook(() => useTokenBalanceSWR(TOKEN, OWNER, { ttlMs: 60_000 }))
 
     expect(result2.current.balance).toBe(100_000_000n)
+    expect(result2.current.decimals).toBe(7)
     expect(result2.current.isLoading).toBe(false)
     expect(result2.current.isRevalidating).toBe(false)
     expect(mockGetTokenBalance).toHaveBeenCalledTimes(1)
