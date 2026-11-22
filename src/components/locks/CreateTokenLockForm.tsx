@@ -10,6 +10,7 @@ import { useWallet } from "@/hooks/useWallet"
 import { useTokenBalanceSWR } from "@/hooks/useTokenBalanceSWR"
 import { createTokenLock } from "@/lib/token-locker"
 import { createSplitLock, type SplitBeneficiary } from "@/lib/split-lock"
+import { fromRawUnits, toRawUnits } from "@/lib/vesting"
 import { trackEvent } from "@/lib/analytics"
 import { addTransaction } from "@/lib/transaction-history"
 import { cn, formatDate, notify } from "@/lib/utils"
@@ -171,12 +172,15 @@ export function CreateTokenLockForm() {
   const validTokenAddress = hasIssue("tokenAddress") ? undefined : trimmedTokenAddress
   const {
     balance: balanceStroops,
+    decimals,
     isLoading: balanceLoading,
     isRevalidating: balanceRevalidating,
   } = useTokenBalanceSWR(validTokenAddress, address ?? null)
-  // Convert stroops (bigint) to a human-readable float for display/validation.
-  // While revalidating we keep the stale value visible — that's the SWR benefit.
-  const balance = balanceStroops !== null ? Number(balanceStroops) / 1e7 : null
+  // Convert stroops (bigint) to a human-readable float for display/validation,
+  // scaling by the token's real decimals instead of assuming 7 (#1059). The
+  // shared helper keeps this identical to the wizard (#1060). While
+  // revalidating we keep the stale value visible — that's the SWR benefit.
+  const balance = balanceStroops !== null && decimals != null ? fromRawUnits(balanceStroops, decimals) : null
 
   const presets = [
     { label: t("tokenForm.days30"), days: 30 },
@@ -193,11 +197,14 @@ export function CreateTokenLockForm() {
   const costArgs = useMemo((): xdr.ScVal[] | null => {
     try {
       if (!validTokenAddress || !address || Number(amount) <= 0 || unlockTs <= Date.now()) return null
+      // The estimate must match what createTokenLock / createSplitLock encode,
+      // so scale by the token's real decimals rather than the old 1e7 (#1059).
+      if (decimals == null) return null
+      const amountStroops = toRawUnits(Number(amount), decimals)
 
       if (multiMode) {
         // Cost estimation for split lock (create_split_lock method)
         if (!splitSharesOk) return null
-        const amountStroops = BigInt(Math.round(Number(amount) * 1e7))
         const beneficiaryArgs = splitBeneficiaries.map((b) =>
           xdr.ScVal.scvMap([
             new xdr.ScMapEntry({
@@ -237,7 +244,6 @@ export function CreateTokenLockForm() {
 
       // Cost estimation for regular lock (create_lock method)
       const beneficiaryAddr = beneficiary.trim().length > 0 ? beneficiary.trim() : address
-      const amountStroops = BigInt(Math.round(Number(amount) * 1e7))
       const args: xdr.ScVal[] = [
         new Address(address).toScVal(),
         new Address(validTokenAddress).toScVal(),
@@ -269,7 +275,7 @@ export function CreateTokenLockForm() {
     } catch {
       return null
     }
-  }, [validTokenAddress, address, amount, beneficiary, unlockTs, vesting, multiMode, splitBeneficiaries, splitSharesOk])
+  }, [validTokenAddress, address, amount, decimals, beneficiary, unlockTs, vesting, multiMode, splitBeneficiaries, splitSharesOk])
 
   function applyPreset(days: number) {
     const date = new Date(Date.now() + days * DAY).toISOString().slice(0, 10)

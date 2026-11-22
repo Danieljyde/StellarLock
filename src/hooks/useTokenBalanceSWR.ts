@@ -4,6 +4,7 @@ import { getOnChainTokenMeta } from "../lib/token-metadata"
 
 interface BalanceCacheEntry {
   balance: bigint
+  decimals: number
   fetchedAt: number
 }
 
@@ -39,6 +40,14 @@ export function useTokenBalanceSWR(
     return cache.get(cacheKey)?.balance ?? null
   })
 
+  // The token's on-chain decimals (null while loading/unknown). Exposed so
+  // callers convert the stroop balance back to display units at the correct
+  // scale instead of assuming 7 decimals (#1059/#1060).
+  const [decimals, setDecimals] = useState<number | null>(() => {
+    if (!cacheKey) return null
+    return cache.get(cacheKey)?.decimals ?? null
+  })
+
   const [isLoading, setIsLoading] = useState(() => {
     if (!cacheKey || !enabled) return false
     return !cache.has(cacheKey)
@@ -62,10 +71,11 @@ export function useTokenBalanceSWR(
       const [fresh, { decimals }] = await Promise.all([getTokenBalanceNumber(token, addr), getOnChainTokenMeta(token)])
       const freshStroops = BigInt(Math.round(fresh * 10 ** decimals))
 
-      cache.set(cacheKey, { balance: freshStroops, fetchedAt: Date.now() })
+      cache.set(cacheKey, { balance: freshStroops, decimals, fetchedAt: Date.now() })
 
       if (latestCacheKeyRef.current === cacheKey) {
         setBalance(freshStroops)
+        setDecimals(decimals)
       }
     } finally {
       setIsRevalidating(false)
@@ -78,6 +88,7 @@ export function useTokenBalanceSWR(
     if (!enabled) return
     if (!cacheKey) {
       setBalance(null)
+      setDecimals(null)
       setIsLoading(false)
       setIsRevalidating(false)
       return
@@ -86,6 +97,7 @@ export function useTokenBalanceSWR(
     const entry = cache.get(cacheKey)
     if (entry) {
       setBalance(entry.balance)
+      setDecimals(entry.decimals)
 
       const isStale = Date.now() - entry.fetchedAt > ttlMs
       if (isStale) {
@@ -116,12 +128,13 @@ export function useTokenBalanceSWR(
   const state = useMemo(() => {
     return {
       balance,
+      decimals,
       isLoading,
       isRevalidating,
       refetch,
       clear,
     }
-  }, [balance, isLoading, isRevalidating, refetch, clear])
+  }, [balance, decimals, isLoading, isRevalidating, refetch, clear])
 
   return state
 }
