@@ -13,3 +13,4 @@ locker-common = { path = "../locker-common" }
 
 [dev-dependencies]
 soroban-sdk = { version = "22.0.7", features = ["testutils"] }
+proptest = "1"
