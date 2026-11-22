@@ -1,5 +1,6 @@
 import { Address, nativeToScVal, xdr } from "@stellar/stellar-sdk"
-import { CONTRACTS, submitCallWithHash, STELLAR_DECIMALS } from "@/lib/stellar"
+import { CONTRACTS, submitCallWithHash } from "@/lib/stellar"
+import { getOnChainTokenMeta } from "@/lib/token-metadata"
 
 export interface SplitBeneficiary {
   address: string
@@ -24,7 +25,10 @@ export async function createSplitLock(
   sourceAddress: string,
   signTransaction: (xdr: string) => Promise<{ signedTxXdr: string }>,
 ): Promise<{ txHash: string }> {
-  const amountStroops = BigInt(Math.round(args.totalAmount * STELLAR_DECIMALS))
+  // Issue #1058: scale by the token's real decimals instead of the hardcoded
+  // 7 (STELLAR_DECIMALS), mirroring createTokenLock / createLpLock.
+  const { decimals } = await getOnChainTokenMeta(args.tokenAddress)
+  const amountStroops = BigInt(Math.round(args.totalAmount * 10 ** decimals))
   const unlockAtBig = BigInt(Math.floor(args.unlockAt))
 
   // Vec<(Address, u64)> — each element is a two-element vec [address, share_bps]
