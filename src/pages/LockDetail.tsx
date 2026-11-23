@@ -42,7 +42,9 @@ import { VerifiedBadge } from "@/components/ui/VerifiedBadge"
 import { NotificationSettings } from "@/components/locks/NotificationSettings"
 import { addNotification } from "@/hooks/useNotifications"
 import { useVerifiedToken } from "@/hooks/useVerifiedToken"
+import { useVerifiedPool } from "@/hooks/useVerifiedPool"
 import { formatAmount, formatUsd, formatDateTime, shortAddress, notify } from "@/lib/utils"
+import { calculateVestingClaimable } from "@/lib/vesting"
 import type { Lock } from "@/types/lock"
 import { createLogger } from "@/lib/logger"
 
@@ -89,12 +91,21 @@ export function LockDetail() {
     <>
       <Helmet>
         <title>
-          Lock #{lock.id} — {formatAmount(lock.amount)} {lock.token.symbol} locked until {formatDateTime(lock.unlockAt)}{" "}
-          | StellarLock
+          {t("lockDetail.pageTitle", {
+            id: lock.id,
+            amount: formatAmount(lock.amount),
+            symbol: lock.token.symbol,
+            date: formatDateTime(lock.unlockAt),
+          })}
         </title>
         <meta
           name="description"
-          content={`Lock #${lock.id}: ${formatAmount(lock.amount)} ${lock.token.symbol} locked until ${formatDateTime(lock.unlockAt)} on StellarLock.`}
+          content={t("lockDetail.pageDescription", {
+            id: lock.id,
+            amount: formatAmount(lock.amount),
+            symbol: lock.token.symbol,
+            date: formatDateTime(lock.unlockAt),
+          })}
         />
       </Helmet>
       <LockDetailView lock={lock} onChange={reload} />
@@ -106,7 +117,7 @@ const log = createLogger("LockDetail")
 
 function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: () => void }) {
   const { t } = useTranslation()
-  const { address, signTransaction } = useWallet()
+  const { address, signTransaction, signMessage } = useWallet()
   const navigate = useNavigate()
 
   // Withdraw and extend show their intended outcome immediately and roll back
@@ -116,18 +127,22 @@ function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: 
 
   const isLp = lock.kind === "lp"
   const verified = useVerifiedToken(lock.token.address)
+  const poolVerified = useVerifiedPool(isLp ? lock.token.address : undefined)
+
+  // Bumped by CountdownTimer's onComplete when `lock.unlockAt` is reached, so
+  // this view re-renders (and re-reads Date.now()) instead of staying frozen
+  // at the render where the countdown was still ticking.
+  const [, forceUnlockTick] = useState(0)
+  const handleCountdownComplete = () => forceUnlockTick((n) => n + 1)
 
   const now = Date.now()
   const isBeneficiary = address === lock.beneficiary
   const isCreator = address === lock.creator
 
+  // Ported to the contract's integer/seconds math (see `calculateVestingClaimable`)
+  // so the UI can't show a claimable amount the contract disagrees with.
   const vestingClaimable = lock.vesting
-    ? Math.max(
-        0,
-        (lock.amount * Math.max(0, Math.min(now, lock.vesting.end) - lock.vesting.start)) /
-          Math.max(1, lock.vesting.end - lock.vesting.start) -
-          lock.vesting.released,
-      )
+    ? calculateVestingClaimable(lock.amount, lock.token.decimals, lock.vesting, now)
     : 0
 
   const canWithdraw =
@@ -168,7 +183,7 @@ function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: 
   // Turns a thrown transaction error into sanitized, translated guidance and
   // announces it, instead of letting the rejection disappear silently.
   function reportTxFailure(err: unknown) {
-    const structured = sanitizeError(err)
+    const structured = sanitizeError(err, isLp ? "lp-locker" : "token-locker")
     setTxError(structured)
     notify.error(err)
     announce(`${t(structured.title)}. ${t(structured.message)}`, "assertive")
@@ -324,19 +339,28 @@ function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: 
             </div>
           </div>
           <div className="flex flex-col items-end gap-2">
-            <StatusBadge status={lock.status} />
+            <StatusBadge status={lock.status} archived={lock.archived} />
             <div className="flex gap-2">
-              <Button variant="outline" size="sm" onClick={() => setQrOpen(true)} title="Share via QR code">
+              <Button variant="outline" size="sm" onClick={() => setQrOpen(true)} title={t("lockDetail.shareViaQr")}>
                 <QrCode className="h-4 w-4" />
-                Share QR
+                {t("lockDetail.shareQr")}
               </Button>
-              <Button variant="outline" size="sm" onClick={() => downloadLockReport(lock)} title="Download lock report">
+              <Button variant="outline" size="sm" onClick={() => downloadLockReport(lock)} title={t("lockDetail.downloadReport")}>
                 <FileDown className="h-4 w-4" />
-                Download Report
+                {t("lockDetail.downloadReportButton")}
               </Button>
             </div>
           </div>
         </div>
+
+        {isLp && poolVerified === false && (
+          <div className="border-b border-yellow-500/30 bg-yellow-500/10 px-6 py-3">
+            <div className="flex items-start gap-3 text-sm text-yellow-700 dark:text-yellow-400">
+              <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0" />
+              <p>{t("lockDetail.unverifiedPoolWarning")}</p>
+            </div>
+          </div>
+        )}
 
         {qrOpen && (
           <QrCodeModal
@@ -384,9 +408,18 @@ function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: 
         <div className="border-t border-border p-6">
           <div className="mb-3 flex items-center justify-between">
             <span className="text-sm font-medium text-muted-foreground">{t("lockDetail.timeRemaining")}</span>
-            <CountdownTimer target={lock.unlockAt} compact className="text-sm font-medium" />
+            <CountdownTimer
+              target={lock.unlockAt}
+              compact
+              className="text-sm font-medium"
+              onComplete={handleCountdownComplete}
+            />
           </div>
-          <CountdownTimer target={lock.unlockAt} className="mb-5 justify-center sm:justify-start" />
+          <CountdownTimer
+            target={lock.unlockAt}
+            className="mb-5 justify-center sm:justify-start"
+            onComplete={handleCountdownComplete}
+          />
           <LockProgressBar createdAt={lock.createdAt} unlockAt={lock.unlockAt} />
         </div>
 
@@ -394,22 +427,22 @@ function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: 
         {lock.vesting && (
           <div className="border-t border-border p-6">
             <div className="mb-4 flex items-center justify-between">
-              <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">Vesting Schedule</h3>
-              <Badge variant="outline">Linear</Badge>
+              <h3 className="text-sm font-semibold uppercase tracking-wider text-muted-foreground">{t("lockDetail.vestingSchedule")}</h3>
+              <Badge variant="outline">{t("lockDetail.linear")}</Badge>
             </div>
             <div className="mb-4 grid gap-3 sm:grid-cols-2">
               <div className="rounded-lg bg-secondary/40 p-3">
-                <p className="text-xs text-muted-foreground">Vesting start</p>
+                <p className="text-xs text-muted-foreground">{t("lockDetail.vestingStart")}</p>
                 <p className="font-medium">{formatDateTime(lock.vesting.start)}</p>
               </div>
               <div className="rounded-lg bg-secondary/40 p-3">
-                <p className="text-xs text-muted-foreground">Vesting end</p>
+                <p className="text-xs text-muted-foreground">{t("lockDetail.vestingEnd")}</p>
                 <p className="font-medium">{formatDateTime(lock.vesting.end)}</p>
               </div>
             </div>
             <div className="mb-3">
               <div className="mb-2 flex justify-between text-sm">
-                <span className="text-muted-foreground">Progress</span>
+                <span className="text-muted-foreground">{t("lockDetail.progress")}</span>
                 <span className="font-medium tabular-nums">
                   {Math.min(
                     100,
@@ -432,19 +465,19 @@ function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: 
             </div>
             <div className="mt-4 grid gap-3 sm:grid-cols-3">
               <div className="rounded-lg bg-secondary/30 p-3 text-center">
-                <p className="text-xs text-muted-foreground">Total</p>
+                <p className="text-xs text-muted-foreground">{t("lockDetail.total")}</p>
                 <p className="font-semibold tabular-nums">
                   {formatAmount(lock.amount)} {lock.token.symbol}
                 </p>
               </div>
               <div className="rounded-lg bg-secondary/30 p-3 text-center">
-                <p className="text-xs text-muted-foreground">Released</p>
+                <p className="text-xs text-muted-foreground">{t("lockDetail.released")}</p>
                 <p className="font-semibold tabular-nums text-success">
                   {formatAmount(lock.vesting.released)} {lock.token.symbol}
                 </p>
               </div>
               <div className="rounded-lg bg-secondary/30 p-3 text-center">
-                <p className="text-xs text-muted-foreground">Claimable</p>
+                <p className="text-xs text-muted-foreground">{t("lockDetail.claimable")}</p>
                 <p className="font-semibold tabular-nums text-primary">
                   {formatAmount(vestingClaimable)} {lock.token.symbol}
                 </p>
@@ -454,12 +487,12 @@ function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: 
         )}
         {lock.metadata && (lock.metadata.description || lock.metadata.projectUrl || lock.metadata.logoUrl) && (
           <div className="border-t border-border p-6">
-            <h3 className="mb-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">Lock Details</h3>
+            <h3 className="mb-4 text-sm font-semibold uppercase tracking-wider text-muted-foreground">{t("lockDetail.lockDetails")}</h3>
             <div className="flex flex-col gap-3">
               {lock.metadata.logoUrl && (
                 <img
                   src={lock.metadata.logoUrl}
-                  alt="Project logo"
+                  alt={t("lockDetail.projectLogoAlt")}
                   className="h-10 w-10 rounded-full border border-border object-cover"
                   onError={(e) => {
                     e.currentTarget.style.display = "none"
@@ -484,7 +517,12 @@ function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: 
         )}
 
         {(isBeneficiary || isCreator) && (
-          <NotificationSettings lockId={lock.id} unlockAt={lock.unlockAt} address={address} />
+          <NotificationSettings
+            lockId={lock.id}
+            unlockAt={lock.unlockAt}
+            address={address}
+            signMessage={signMessage}
+          />
         )}
 
         {txPhase !== "idle" && (
@@ -602,6 +640,13 @@ function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: 
         )}
       </Card>
 
+      {lock.archived && (
+        <div className="mt-4 flex items-start gap-3 rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
+          <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-muted-foreground" />
+          <p>{t("lockDetail.archivedNotice")}</p>
+        </div>
+      )}
+
       {lock.status === "locked" && (
         <div className="mt-4 flex items-start gap-3 rounded-xl border border-border bg-card p-4 text-sm text-muted-foreground">
           <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0 text-success" />
@@ -620,10 +665,14 @@ function LockDetailView({ lock: sourceLock, onChange }: { lock: Lock; onChange: 
       {verified === false && (
         <div className="mt-4 flex items-start gap-3 rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-4 text-sm text-yellow-700 dark:text-yellow-400">
           <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0" />
-          <p>
-            This token is <strong>not on the StellarLock verified allowlist</strong>. Anyone can lock any token — always
-            verify the token contract address independently before trusting this lock.
-          </p>
+          <p>{t("lockDetail.unverifiedWarning")}</p>
+        </div>
+      )}
+
+      {isLp && poolVerified === false && (
+        <div className="mt-4 flex items-start gap-3 rounded-xl border border-yellow-500/30 bg-yellow-500/10 p-4 text-sm text-yellow-700 dark:text-yellow-400">
+          <ShieldCheck className="mt-0.5 h-5 w-5 shrink-0" />
+          <p>{t("lockDetail.unverifiedPoolWarning")}</p>
         </div>
       )}
     </div>

@@ -18,7 +18,7 @@ export interface FieldValidationIssue {
   guidance?: string
 }
 
-export interface LockFormValidationResult {
+interface LockFormValidationResult {
   isValid: boolean
   issues: FieldValidationIssue[]
 }
@@ -207,6 +207,23 @@ export function validateLpLockForm(params: {
       message: "Invalid token B contract address.",
       guidance: "Paste a Stellar token contract id (starts with C).",
     })
+  }
+
+  if (tokenATrimmed && tokenBTrimmed && tokenATrimmed === tokenBTrimmed) {
+    const identicalTokensMessage = "Token A and Token B must be different."
+    const identicalTokensGuidance = "Enter two different Stellar token contract ids."
+    issues.push(
+      {
+        field: "tokenA",
+        message: identicalTokensMessage,
+        guidance: identicalTokensGuidance,
+      },
+      {
+        field: "tokenB",
+        message: identicalTokensMessage,
+        guidance: identicalTokensGuidance,
+      },
+    )
   }
 
   const beneficiaryValid = isValidStellarAddress(wallet)

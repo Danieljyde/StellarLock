@@ -37,6 +37,9 @@ vi.mock("@/hooks/useWallet", () => ({
     disconnect: vi.fn(),
     signTransaction: vi.fn(),
   }),
+}))
+
+vi.mock("@/hooks/WalletProvider", () => ({
   WalletProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }))
 
@@ -95,7 +98,6 @@ vi.mock("@/hooks/useLocks", () => ({
   useLocksByToken: () => ({ data: null, loading: false, error: null }),
   useLockCountByToken: () => ({ data: 0, loading: false }),
   useTokenBalance: () => ({ data: null, loading: false }),
-  useTokenAllowance: () => ({ data: null, loading: false }),
   useDiscoverStats: () => ({
     data: {
       source: "mock",
@@ -117,7 +119,6 @@ vi.mock("@/hooks/useRpcHealth", () => ({
 
 vi.mock("@/hooks/useContractEventContext", () => ({
   useContractEventContext: () => ({ events: [] }),
-  ContractEventProvider: ({ children }: { children: React.ReactNode }) => <>{children}</>,
 }))
 
 // Stub the form components that have pre-existing parse issues so they render

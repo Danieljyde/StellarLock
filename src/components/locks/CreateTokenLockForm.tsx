@@ -7,10 +7,10 @@ import { Input, Label } from "@/components/ui/Input"
 import { Button } from "@/components/ui/Button"
 import { TxProgressSteps } from "@/components/ui/TxProgressSteps"
 import { useWallet } from "@/hooks/useWallet"
-import { useTokenAllowance } from "@/hooks/useLocks"
 import { useTokenBalanceSWR } from "@/hooks/useTokenBalanceSWR"
 import { createTokenLock } from "@/lib/token-locker"
 import { createSplitLock, type SplitBeneficiary } from "@/lib/split-lock"
+import { fromRawUnits, toRawUnits } from "@/lib/vesting"
 import { trackEvent } from "@/lib/analytics"
 import { addTransaction } from "@/lib/transaction-history"
 import { cn, formatDate, notify } from "@/lib/utils"
@@ -20,7 +20,7 @@ import { sanitizeError } from "@/lib/error-sanitizer"
 import type { StructuredError } from "@/lib/errors"
 import { TxErrorAlert } from "@/components/ui/TxErrorAlert"
 import { useAnnouncer } from "@/hooks/useAnnouncer"
-import { CONTRACTS, type TxPhase, submitTokenApproval } from "@/lib/stellar"
+import { CONTRACTS, type TxPhase } from "@/lib/stellar"
 import { ConfirmLockModal } from "@/components/locks/ConfirmLockModal"
 import { CostEstimate } from "@/components/locks/CostEstimate"
 import { MultiBeneficiaryFields } from "@/components/locks/MultiBeneficiaryFields"
@@ -55,7 +55,6 @@ export function CreateTokenLockForm() {
   const [vestingTemplate, setVestingTemplate] = useState<VestingTemplate>("none")
   const [vestingStartDate, setVestingStartDate] = useState("")
   const [submitting, setSubmitting] = useState(false)
-  const [approving, setApproving] = useState(false)
   const [txPhase, setTxPhase] = useState<TxPhase | "idle">("idle")
   const [error, setError] = useState<StructuredError | null>(null)
   const [showConfirm, setShowConfirm] = useState(false)
@@ -134,12 +133,14 @@ export function CreateTokenLockForm() {
   const trimmedTokenAddress = tokenAddress.trim()
   const trimmedBeneficiary = beneficiary.trim()
 
+  // True when the split-beneficiary rows are ready to submit: exactly 10 000 bps
+  // total and at least two entries (mirrors the validation in MultiBeneficiaryFields).
+  const splitSharesOk =
+    splitBeneficiaries.length >= 2 && splitBeneficiaries.reduce((sum, b) => sum + b.shareBps, 0) === 10_000
+
   // Single source of truth for this form's validity — the same module backs
   // CreateLpLockForm, so the two forms can't drift apart. Memoized because
   // FormValidationErrors keys its screen-reader announcement off the result.
-  //
-  // `allowance` is deliberately not passed: a low allowance is recoverable from
-  // the confirm modal's Approve button, so it must not block reaching it.
   const validation = useMemo(
     () =>
       validateTokenLockForm({
@@ -171,17 +172,15 @@ export function CreateTokenLockForm() {
   const validTokenAddress = hasIssue("tokenAddress") ? undefined : trimmedTokenAddress
   const {
     balance: balanceStroops,
+    decimals,
     isLoading: balanceLoading,
     isRevalidating: balanceRevalidating,
   } = useTokenBalanceSWR(validTokenAddress, address ?? null)
-  // Convert stroops (bigint) to a human-readable float for display/validation.
-  // While revalidating we keep the stale value visible — that's the SWR benefit.
-  const balance = balanceStroops !== null ? Number(balanceStroops) / 1e7 : null
-  const { data: allowance, loading: allowanceLoading } = useTokenAllowance(
-    validTokenAddress,
-    address ?? null,
-    CONTRACTS.tokenLocker,
-  )
+  // Convert stroops (bigint) to a human-readable float for display/validation,
+  // scaling by the token's real decimals instead of assuming 7 (#1059). The
+  // shared helper keeps this identical to the wizard (#1060). While
+  // revalidating we keep the stale value visible — that's the SWR benefit.
+  const balance = balanceStroops !== null && decimals != null ? fromRawUnits(balanceStroops, decimals) : null
 
   const presets = [
     { label: t("tokenForm.days30"), days: 30 },
@@ -198,11 +197,14 @@ export function CreateTokenLockForm() {
   const costArgs = useMemo((): xdr.ScVal[] | null => {
     try {
       if (!validTokenAddress || !address || Number(amount) <= 0 || unlockTs <= Date.now()) return null
-      
+      // The estimate must match what createTokenLock / createSplitLock encode,
+      // so scale by the token's real decimals rather than the old 1e7 (#1059).
+      if (decimals == null) return null
+      const amountStroops = toRawUnits(Number(amount), decimals)
+
       if (multiMode) {
         // Cost estimation for split lock (create_split_lock method)
         if (!splitSharesOk) return null
-        const amountStroops = BigInt(Math.round(Number(amount) * 1e7))
         const beneficiaryArgs = splitBeneficiaries.map((b) =>
           xdr.ScVal.scvMap([
             new xdr.ScMapEntry({
@@ -213,7 +215,7 @@ export function CreateTokenLockForm() {
               key: xdr.ScVal.scvSymbol("share_bps"),
               val: nativeToScVal(b.shareBps, { type: "u32" }),
             }),
-          ])
+          ]),
         )
         return [
           new Address(address).toScVal(),
@@ -239,10 +241,9 @@ export function CreateTokenLockForm() {
             : xdr.ScVal.scvVoid(),
         ]
       }
-      
+
       // Cost estimation for regular lock (create_lock method)
       const beneficiaryAddr = beneficiary.trim().length > 0 ? beneficiary.trim() : address
-      const amountStroops = BigInt(Math.round(Number(amount) * 1e7))
       const args: xdr.ScVal[] = [
         new Address(address).toScVal(),
         new Address(validTokenAddress).toScVal(),
@@ -274,7 +275,7 @@ export function CreateTokenLockForm() {
     } catch {
       return null
     }
-  }, [validTokenAddress, address, amount, beneficiary, unlockTs, vesting, multiMode, splitBeneficiaries, splitSharesOk])
+  }, [validTokenAddress, address, amount, decimals, beneficiary, unlockTs, vesting, multiMode, splitBeneficiaries, splitSharesOk])
 
   function applyPreset(days: number) {
     const date = new Date(Date.now() + days * DAY).toISOString().slice(0, 10)
@@ -307,7 +308,7 @@ export function CreateTokenLockForm() {
   // Sanitize before display so raw RPC/Soroban text never reaches the UI, and
   // announce the failure for screen readers.
   function reportFailure(err: unknown) {
-    const structured = sanitizeError(err)
+    const structured = sanitizeError(err, "token-locker")
     setError(structured)
     announce(`${t(structured.title)}. ${t(structured.message)}`, "assertive")
   }
@@ -406,26 +407,6 @@ export function CreateTokenLockForm() {
     }
   }
 
-  async function handleApprove() {
-    setApproving(true)
-    try {
-      await submitTokenApproval(
-        tokenAddress.trim(),
-        address!,
-        CONTRACTS.tokenLocker,
-        Number(amount),
-        address!,
-        signTransaction,
-      )
-      trackEvent("token_approve")
-    } catch (err: unknown) {
-      log.error("[approve error]", err)
-      reportFailure(err)
-    } finally {
-      setApproving(false)
-    }
-  }
-
   return (
     <>
       <form onSubmit={submit} className="flex flex-col gap-5">
@@ -447,7 +428,7 @@ export function CreateTokenLockForm() {
             <Label htmlFor="amount">{t("tokenForm.amount")}</Label>
             {validTokenAddress && (
               <span className="flex items-center gap-1 text-xs text-muted-foreground">
-                {balanceLoading || allowanceLoading ? (
+                {balanceLoading ? (
                   <Loader2 className="h-3 w-3 animate-spin" />
                 ) : balance != null ? (
                   <>
@@ -514,7 +495,7 @@ export function CreateTokenLockForm() {
                 type="button"
                 onClick={() => setAddressBookOpen(true)}
                 className="flex items-center gap-1 rounded-md px-2 py-1 text-xs text-muted-foreground transition-colors hover:bg-secondary hover:text-foreground"
-                title="Open address book"
+                title={t("tokenForm.openAddressBook")}
               >
                 <BookUser className="h-3.5 w-3.5" />
                 Address Book
@@ -653,12 +634,12 @@ export function CreateTokenLockForm() {
           {metaOpen && (
             <div className="flex flex-col gap-4 border-t border-border px-4 pb-4 pt-3">
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="meta-desc">Description</Label>
+                <Label htmlFor="meta-desc">{t("tokenForm.description")}</Label>
                 <textarea
                   id="meta-desc"
                   rows={3}
                   maxLength={280}
-                  placeholder="Why is this lock being created? (e.g. Team tokens locked for 2 years)"
+                  placeholder={t("tokenForm.descriptionPlaceholder")}
                   value={description}
                   onChange={(e) => setDescription(e.target.value)}
                   className="w-full resize-none rounded-lg border border-border bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus:outline-none focus:ring-1 focus:ring-primary"
@@ -666,7 +647,7 @@ export function CreateTokenLockForm() {
                 <p className="text-end text-xs text-muted-foreground">{description.length}/280</p>
               </div>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="meta-url">Project URL</Label>
+                <Label htmlFor="meta-url">{t("tokenForm.projectUrl")}</Label>
                 <Input
                   id="meta-url"
                   type="url"
@@ -676,7 +657,7 @@ export function CreateTokenLockForm() {
                 />
               </div>
               <div className="flex flex-col gap-1.5">
-                <Label htmlFor="meta-logo">Logo URL</Label>
+                <Label htmlFor="meta-logo">{t("tokenForm.logoUrl")}</Label>
                 <Input
                   id="meta-logo"
                   type="url"
@@ -710,10 +691,10 @@ export function CreateTokenLockForm() {
 
         <TxErrorAlert error={error} />
 
-        <CostEstimate 
-          contractId={CONTRACTS.tokenLocker} 
-          method={multiMode ? "create_split_lock" : "create_lock"} 
-          args={costArgs} 
+        <CostEstimate
+          contractId={CONTRACTS.tokenLocker}
+          method={multiMode ? "create_split_lock" : "create_lock"}
+          args={costArgs}
         />
 
         <FormValidationErrors issues={visibleIssues} />
@@ -748,14 +729,10 @@ export function CreateTokenLockForm() {
               unlockDate: unlockDate,
               vesting,
               balance,
-              allowance,
-              needsApproval: allowance != null && allowance < Number(amount),
             }}
             onConfirm={() => void confirmLock()}
-            onApprove={() => void handleApprove()}
             onCancel={() => setShowConfirm(false)}
             loading={submitting}
-            approving={approving}
           />
           <div className="fixed bottom-6 left-1/2 z-50 w-full max-w-sm -translate-x-1/2 px-4">
             <TxProgressSteps phase={txPhase} />
