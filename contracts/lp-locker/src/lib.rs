@@ -252,7 +252,7 @@ impl LpLocker {
         }
 
         if let Some(ref v) = vesting {
-            if v.end <= v.start {
+            if v.end <= v.start || v.end <= unlock_at {
                 return Err(ContractError::VestingEndBeforeStart);
             }
         }
@@ -615,7 +615,7 @@ impl LpLocker {
         }
 
         if let Some(ref v) = vesting {
-            if v.end <= v.start {
+            if v.end <= v.start || v.end <= unlock_at {
                 return Err(ContractError::VestingEndBeforeStart);
             }
         }

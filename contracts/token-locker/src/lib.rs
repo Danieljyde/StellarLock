@@ -227,7 +227,7 @@ impl TokenLocker {
         }
 
         if let Some(ref v) = vesting {
-            if v.end <= v.start {
+            if v.end <= v.start || v.end <= unlock_at {
                 return Err(ContractError::VestingEndBeforeStart);
             }
         }
@@ -577,7 +577,7 @@ impl TokenLocker {
         }
 
         if let Some(ref v) = vesting {
-            if v.end <= v.start {
+            if v.end <= v.start || v.end <= unlock_at {
                 return Err(ContractError::VestingEndBeforeStart);
             }
         }
