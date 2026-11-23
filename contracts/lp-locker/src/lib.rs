@@ -80,6 +80,7 @@ pub enum ContractError {
     ContractPaused = 21,
     ExtensionLimitExceeded = 22,
     NotInitialized = 25,
+    InvalidBeneficiary = 26,
 }
 
 // ── On-chain types ────────────────────────────────────────────────────────────
@@ -223,6 +224,10 @@ impl LpLocker {
     ) -> Result<u64, ContractError> {
         creator.require_auth();
         require_not_paused(&env)?;
+
+        if beneficiary == env.current_contract_address() {
+            return Err(ContractError::InvalidBeneficiary);
+        }
 
         if amount <= 0 {
             return Err(ContractError::AmountMustBePositive);
@@ -423,8 +428,13 @@ impl LpLocker {
         guard_enter(&env)?;
         let result = (|| {
             require_not_paused(&env)?;
+
+            if new_beneficiary == env.current_contract_address() {
+                return Err(ContractError::InvalidBeneficiary);
+            }
+
             let mut lock = load_lock(&env, id)?;
-            lock.creator.require_auth();
+            lock.beneficiary.require_auth();
 
             if lock.withdrawn {
                 return Err(ContractError::AlreadyWithdrawn);
@@ -587,6 +597,12 @@ impl LpLocker {
     ) -> Result<u64, ContractError> {
         creator.require_auth();
         require_not_paused(&env)?;
+
+        for (beneficiary, _) in beneficiaries.iter() {
+            if *beneficiary == env.current_contract_address() {
+                return Err(ContractError::InvalidBeneficiary);
+            }
+        }
 
         if total_amount <= 0 {
             return Err(ContractError::AmountMustBePositive);

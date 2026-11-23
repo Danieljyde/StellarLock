@@ -518,6 +518,11 @@
       "title": "Contract Paused",
       "message": "The contract is currently paused by the administrator for maintenance or emergency.",
       "recovery": "Please try again later once operations have been resumed."
+    },
+    "invalidBeneficiary": {
+      "title": "Invalid Beneficiary",
+      "message": "The beneficiary cannot be the locker contract itself.",
+      "recovery": "Choose a different Stellar address as the beneficiary."
     }
   },
   "analytics": {

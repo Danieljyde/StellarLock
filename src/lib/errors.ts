@@ -174,6 +174,13 @@ const CONTRACT_ERRORS: Record<string, Omit<StructuredError, "code">> = {
     link: null,
     i18nKey: "errors.contractPaused",
   },
+  InvalidBeneficiary: {
+    title: "errors.invalidBeneficiary.title",
+    message: "errors.invalidBeneficiary.message",
+    recovery: "errors.invalidBeneficiary.recovery",
+    link: null,
+    i18nKey: "errors.invalidBeneficiary",
+  },
 }
 
 // Map wallet/network errors
