@@ -2,7 +2,7 @@
 
 Token and LP liquidity lock platform built on [Stellar Soroban](https://soroban.stellar.org). Lock tokens or LP pool shares in an immutable on-chain contract, then share a public verifiable link so your community knows the liquidity can't be rugged.
 
-![Landing](landing.png)
+![Landing](docs/screenshots/landing.png)
 
 ## Features
 
@@ -192,6 +192,12 @@ See [docs/indexer-architecture.md](docs/indexer-architecture.md) for event idemp
 | `TOKEN_LOCKER_CONTRACT`, `LP_LOCKER_CONTRACT` | indexer | Contracts to index. At least one is required. |
 | `RESEND_API_KEY`, `EMAIL_FROM` | notifier | Email delivery. Emails are skipped if the key is unset. |
 | `WEBHOOK_SECRET` | notifier | HMAC key for the `X-StellarLock-Signature` header |
+| `NOTIFICATION_LINK_SECRET` | notifier, `api/` | HMAC key for signed unsubscribe links in emails (falls back to `WEBHOOK_SECRET`) |
+| `INDEXER_POLL_INTERVAL_MS`, `INDEXER_RPC_TIMEOUT_MS` | indexer | Poll interval (default 10s) and per-RPC-call timeout (default 15s) |
+| `NOTIFIER_INTERVAL_MS` | notifier | Run interval (default 1h) |
+| `PUBLIC_APP_URL` | notifier, `api/` | Base URL for links in reminders (default `https://app.stellarlock.xyz`) |
+
+The full list, with required/optional status and defaults, is in the **Indexer & notifier (server-side)** section of [`.env.example`](.env.example).
 
 ## Smart Contracts
 
@@ -269,8 +275,8 @@ Same shape as Token Locker, minus vesting, plus `dex`, `token_a`, `token_b` fiel
 
 | | |
 |---|---|
-| ![Create](create.png) | ![Explorer](explorer.png) |
-| ![My Locks](mylocks.png) | ![Detail](detail.png) |
+| ![Create](docs/screenshots/create.png) | ![Explorer](docs/screenshots/explorer.png) |
+| ![My Locks](docs/screenshots/mylocks.png) | ![Detail](docs/screenshots/detail.png) |
 
 ## Upgrade Policy
 
@@ -302,6 +308,10 @@ Admin ownership can be transferred without changing the upgrade timelock. The cu
 
 > The upgrade path exists solely for critical security fixes. User lock funds are held in persistent storage and are unaffected by WASM upgrades.
 
+## Documentation
+
+Architecture notes, runbooks, ADRs and other project documentation are indexed in **[docs/README.md](docs/README.md)**.
+
 ## Troubleshooting
 
 Hitting a wallet connection failure, wrong-network error, stuck transaction, or a contract rejection? See **[docs/troubleshooting.md](docs/troubleshooting.md)** for a full list of error cases with causes and fixes.
@@ -323,3 +333,37 @@ MIT
 - #779: CreateLpLockForm's beneficiary field has no i18n key at all, unlike CreateTokenLockForm's
 <!-- handsoff-issue-785 -->
 - #785: NotificationSettings validates the email address but saves the webhook URL with no format check
+
+<!-- handsoff-issue-724 -->
+- #724: No test coverage for pause()/unpause() actually blocking state-mutating calls
+
+<!-- handsoff-issue-725 -->
+- #725: No test coverage for MIN/MAX lock-duration bounds (LockDurationTooShort/LockDurationTooLong)
+
+<!-- handsoff-issue-726 -->
+- #726: No test coverage for extend()'s ExtensionLimitExceeded / MAX_EXTENSIONS cap
+
+<!-- handsoff-issue-727 -->
+- #727: No test coverage for lp-locker's IdenticalTokens check
+<!-- handsoff-issue-720 -->
+- #720: execute_upgrade performs the WASM upgrade without emitting an event
+
+<!-- handsoff-issue-721 -->
+- #721: init() has no event emission for contract initialization
+
+<!-- handsoff-issue-722 -->
+- #722: init() panics instead of returning a typed ContractError when already initialized
+
+<!-- handsoff-issue-723 -->
+- #723: Dead/unused ContractError::NotAdmin variant left in both contracts after the NotInitialized fix
+<!-- handsoff-issue-728 -->
+- #728: token-locker has no pagination test for get_split_groups_by_creator (unlike lp-locker)
+
+<!-- handsoff-issue-729 -->
+- #729: No test coverage for the token-locker create_split_lock TVL/global-stats gap
+
+<!-- handsoff-issue-730 -->
+- #730: No test coverage for a zero-vesting-start / malicious Vesting.released input at lock creation
+
+<!-- handsoff-issue-731 -->
+- #731: remove_from_index rebuilds the entire index Vec on every transfer_beneficiary call
