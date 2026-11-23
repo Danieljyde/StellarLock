@@ -4,11 +4,13 @@
 #![allow(clippy::too_many_arguments)]
 
 #[cfg(test)]
+mod prop_tests;
+#[cfg(test)]
 mod tests;
 
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env, Symbol,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, token, vec, Address, BytesN, Env,
+    InvokeError, Symbol, Vec,
 };
 
 // ── Shared types, constants, and helpers from locker-common ──────────────────
@@ -48,9 +50,13 @@ pub enum DataKey {
     Paused,
 }
 
-// UPGRADE_DELAY and UpgradeProposal are provided by locker_common.
-
 // ── Error types ───────────────────────────────────────────────────────────────
+//
+// Note: the `NotAdmin` variant (formerly 6) has been removed — it was never
+// reachable because all admin-gated functions return `NotInitialized` when no
+// admin is set, and `require_auth()` panics (rather than returning an error)
+// when the caller is not the admin.  Keeping the variant would leave dead
+// code that mutation tests could exploit.  Issue #723.
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -60,7 +66,6 @@ pub enum ContractError {
     AlreadyWithdrawn = 3,
     StillLocked = 4,
     CanOnlyExtend = 5,
-    NotAdmin = 6,
     NoPendingAdmin = 7,
     NotPendingAdmin = 8,
     ReentrancyDetected = 9,
@@ -70,6 +75,8 @@ pub enum ContractError {
     TooManyBeneficiaries = 13,
     SharesMustSum10000 = 14,
     VestingEndBeforeStart = 15,
+    VestingOutsideLockBounds = 26,
+    DuplicateBeneficiary = 27,
     NothingToRelease = 16,
     RateLimitExceeded = 17,
     NoPendingUpgrade = 18,
@@ -80,10 +87,12 @@ pub enum ContractError {
     ContractPaused = 21,
     ExtensionLimitExceeded = 22,
     NotInitialized = 25,
-    InvalidBeneficiary = 26,
+    AlreadyInitialized = 29,
+    /// The pool contract exposes `token_a()`/`token_b()` getters but the
+    /// addresses returned do not match the `token_a`/`token_b` arguments
+    /// supplied by the caller.  Error code 28 is reserved for this variant.
+    InvalidPoolTokens = 28,
 }
-
-// ── On-chain types ────────────────────────────────────────────────────────────
 
 // ── On-chain types ────────────────────────────────────────────────────────────
 //
@@ -139,13 +148,6 @@ pub struct LpLock {
 }
 
 // ── Contract-specific helpers ─────────────────────────────────────────────────
-//
-// `next_id`, `push_index`, `remove_from_index`, `get_index`,
-// `collect_paginated`, `calculate_vested`, `enter_guard`, and `exit_guard`
-// are all provided by `locker_common` and re-exported above.
-//
-// Only helpers that depend on the contract-specific `LpLock` type or DataKey
-// variants remain here.
 
 fn get_id(env: &Env) -> u64 {
     next_id(env, DataKey::NextId, 5_000)
@@ -200,6 +202,78 @@ fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     Ok(())
 }
 
+fn validate_vesting_bounds(
+    vesting: Option<&Vesting>,
+    created_at: u64,
+    unlock_at: u64,
+) -> Result<(), ContractError> {
+    if let Some(v) = vesting {
+        if v.end <= v.start {
+            return Err(ContractError::VestingEndBeforeStart);
+        }
+        if v.start < created_at || v.start > unlock_at {
+            return Err(ContractError::VestingOutsideLockBounds);
+        }
+    }
+    Ok(())
+}
+
+// ── Pool-token verification ───────────────────────────────────────────────────
+//
+// Performs a *best-effort* cross-contract check.  If the pool contract exposes
+// `token_a()` and `token_b()` getters (Aquarius / Soroswap standard), we call
+// them and compare the returned addresses against the `token_a` / `token_b`
+// arguments supplied by the caller.  If the getters do not exist — or the
+// cross-contract call fails for any other reason — we skip the check silently
+// rather than blocking the lock.
+//
+// See contracts/README.md §"Pool-token verification" for a full discussion.
+//
+// Issue #732: Prevents callers from creating locks with mismatched token
+// metadata by validating against the pool contract's own reported values.
+
+fn verify_pool_tokens(
+    env: &Env,
+    pool_share: &Address,
+    token_a: &Address,
+    token_b: &Address,
+) -> Result<(), ContractError> {
+    // Try to call `token_a()` on the pool contract.
+    // try_invoke_contract returns Err(_) when the call itself fails (e.g. the
+    // function does not exist), which we treat as "interface not supported →
+    // skip check".
+    let reported_a: Address = match env
+        .try_invoke_contract::<Address, InvokeError>(
+            pool_share,
+            &Symbol::new(env, "token_a"),
+            vec![env],
+        ) {
+        Ok(Ok(addr)) => addr,
+        // Call failed or getter absent — skip the check entirely.
+        _ => return Ok(()),
+    };
+
+    let reported_b: Address = match env
+        .try_invoke_contract::<Address, InvokeError>(
+            pool_share,
+            &Symbol::new(env, "token_b"),
+            vec![env],
+        ) {
+        Ok(Ok(addr)) => addr,
+        _ => return Ok(()),
+    };
+
+    // Accept either (token_a, token_b) or (token_b, token_a) — pool contracts
+    // don't guarantee a canonical ordering.
+    let matches = (token_a == &reported_a && token_b == &reported_b)
+        || (token_a == &reported_b && token_b == &reported_a);
+    if !matches {
+        return Err(ContractError::InvalidPoolTokens);
+    }
+
+    Ok(())
+}
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -209,6 +283,23 @@ pub struct LpLocker;
 impl LpLocker {
     /// Lock `amount` of pool-share tokens until `unlock_at` (unix seconds).
     /// Returns the new lock id.
+    ///
+    /// ## Pool-token verification (best-effort)
+    ///
+    /// Before accepting the lock this function attempts to verify that
+    /// `token_a` and `token_b` match what the pool contract itself reports.
+    /// It does so by calling the `token_a()` and `token_b()` getters on
+    /// `pool_share` via a cross-contract call.
+    ///
+    /// **When the check is enforced:** if the pool contract exposes both
+    /// `token_a()` and `token_b()` getters (Aquarius / Soroswap standard)
+    /// and they return addresses that differ from the supplied `token_a` /
+    /// `token_b` arguments, the call is rejected with
+    /// [`ContractError::InvalidPoolTokens`] (error code 28).
+    ///
+    /// **When the check is skipped:** if the pool contract does not expose
+    /// those getters, or if the cross-contract call fails for any other
+    /// reason, the check is silently bypassed and the lock proceeds.
     pub fn create_lock(
         env: Env,
         creator: Address,
@@ -249,6 +340,9 @@ impl LpLocker {
             return Err(ContractError::IdenticalTokens);
         }
 
+        // Best-effort pool-token check (issue #732).
+        verify_pool_tokens(&env, &pool_share, &token_a, &token_b)?;
+
         // ── Rate limiting ─────────────────────────────────────────────────────
         let rate_key = DataKey::LastLockAt(creator.clone());
         let last_at: u64 = env.storage().temporary().get(&rate_key).unwrap_or(0);
@@ -256,11 +350,7 @@ impl LpLocker {
             return Err(ContractError::RateLimitExceeded);
         }
 
-        if let Some(ref v) = vesting {
-            if v.end <= v.start {
-                return Err(ContractError::VestingEndBeforeStart);
-            }
-        }
+        validate_vesting_bounds(vesting.as_ref(), now, unlock_at)?;
 
         token::Client::new(&env, &pool_share).transfer(
             &creator,
@@ -624,17 +714,16 @@ impl LpLocker {
             return Err(ContractError::IdenticalTokens);
         }
 
+        // Issue #732: best-effort pool-token verification.
+        verify_pool_tokens(&env, &pool_share, &token_a, &token_b)?;
+
         let rate_key = DataKey::LastLockAt(creator.clone());
         let last_at: u64 = env.storage().temporary().get(&rate_key).unwrap_or(0);
         if now.saturating_sub(last_at) < RATE_LIMIT_COOLDOWN {
             return Err(ContractError::RateLimitExceeded);
         }
 
-        if let Some(ref v) = vesting {
-            if v.end <= v.start {
-                return Err(ContractError::VestingEndBeforeStart);
-            }
-        }
+        validate_vesting_bounds(vesting.as_ref(), now, unlock_at)?;
 
         let n = beneficiaries.len();
         if n < 2 {
@@ -646,9 +735,15 @@ impl LpLocker {
 
         let mut total_bps: u64 = 0;
         for i in 0..n {
-            let (_, bps) = beneficiaries.get(i).unwrap();
+            let (beneficiary, bps) = beneficiaries.get(i).unwrap();
             if bps == 0 {
                 return Err(ContractError::SharesMustSum10000);
+            }
+            for j in 0..i {
+                let (existing, _) = beneficiaries.get(j).unwrap();
+                if beneficiary == existing {
+                    return Err(ContractError::DuplicateBeneficiary);
+                }
             }
             total_bps += bps;
         }
@@ -682,6 +777,9 @@ impl LpLocker {
                     .ok_or(ContractError::AmountOverflow)?;
                 amount
             };
+            if share_amount <= 0 {
+                return Err(ContractError::AmountMustBePositive);
+            }
 
             // The first sub-lock reuses group_id so the group_id is also a
             // valid lock id; subsequent sub-locks get their own ids.
@@ -720,14 +818,8 @@ impl LpLocker {
             );
             lock_ids.push_back(lock_id);
 
-            // Each split-group child is a fully independent LpLock (its own
-            // id, later withdrawable/extendable/transferable via the standard
-            // entry points), so it gets its own `lp_lock_created` event with
-            // its own beneficiary/amount, exactly like `create_lock` and
-            // mirroring the token-locker's per-child `lock_created` events.
-            // This lets the indexer track every child individually instead of
-            // dropping them entirely (the group-level `lp_split_lock_created`
-            // event below has no per-lock handler).
+            // Each split-group child gets its own `lp_lock_created` event so
+            // the indexer can track every child individually.
             env.events().publish(
                 (
                     Symbol::new(&env, "lp_lock_created"),
@@ -781,9 +873,12 @@ impl LpLocker {
                 .persistent()
                 .get(&DataKey::UniquePoolShareCount)
                 .unwrap_or(0);
+            let new_unique_count = unique_count
+                .checked_add(1)
+                .ok_or(ContractError::AmountOverflow)?;
             env.storage()
                 .persistent()
-                .set(&DataKey::UniquePoolShareCount, &(unique_count + 1));
+                .set(&DataKey::UniquePoolShareCount, &new_unique_count);
         }
         env.storage()
             .persistent()
@@ -795,9 +890,12 @@ impl LpLocker {
             .persistent()
             .get(&DataKey::GlobalLockCount)
             .unwrap_or(0);
+        let new_lock_count = lock_count
+            .checked_add(n as u64)
+            .ok_or(ContractError::AmountOverflow)?;
         env.storage()
             .persistent()
-            .set(&DataKey::GlobalLockCount, &(lock_count + n as u64));
+            .set(&DataKey::GlobalLockCount, &new_lock_count);
 
         env.events().publish(
             (
@@ -829,7 +927,7 @@ impl LpLocker {
         let mut out: Vec<SplitGroup> = vec![&env];
         let len = ids.len();
         let start = offset.min(len);
-        let end = (start + limit).min(len);
+        let end = start.saturating_add(limit).min(len);
         let mut i = start;
         while i < end {
             let id = ids.get(i).unwrap();
@@ -915,15 +1013,30 @@ impl LpLocker {
 
     // ── Upgrade mechanism (7-day timelock) ───────────────────────────────────
 
-    pub fn init(env: Env, admin: Address) {
+    /// Must be called once after deployment to set the admin.
+    ///
+    /// Returns `ContractError::AlreadyInitialized` if called a second time,
+    /// instead of panicking, so callers can distinguish "already initialised"
+    /// from other errors programmatically. (Issue #722)
+    ///
+    /// Emits a `contract_initialized` event so indexers can record the exact
+    /// deployment timestamp on-chain. (Issue #721)
+    pub fn init(env: Env, admin: Address) -> Result<(), ContractError> {
         if env.storage().instance().has(&DataKey::Admin) {
-            panic!("already initialised");
+            return Err(ContractError::AlreadyInitialized);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+        // Issue #721: emit an on-chain event so indexers can record the
+        // deployment timestamp and admin address without relying on tx metadata.
+        env.events().publish(
+            (Symbol::new(&env, "contract_initialized"), admin),
+            (),
+        );
+        Ok(())
     }
 
     pub fn propose_upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), ContractError> {
@@ -934,6 +1047,7 @@ impl LpLocker {
             .ok_or(ContractError::NotInitialized)?;
         admin.require_auth();
         let execute_after = env.ledger().timestamp() + UPGRADE_DELAY;
+        let event_wasm_hash = new_wasm_hash.clone();
         let proposal = UpgradeProposal {
             new_wasm_hash,
             execute_after,
@@ -944,11 +1058,21 @@ impl LpLocker {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
-        env.events()
-            .publish((Symbol::new(&env, "upgrade_proposed"), execute_after), ());
+        env.events().publish(
+            (
+                Symbol::new(&env, "upgrade_proposed"),
+                execute_after,
+                event_wasm_hash,
+            ),
+            (),
+        );
         Ok(())
     }
 
+    /// Execute a previously proposed upgrade after the timelock has elapsed.
+    ///
+    /// Emits an `upgrade_executed` event with the new WASM hash so indexers
+    /// and monitoring tools can track contract upgrades on-chain. (Issue #720)
     pub fn execute_upgrade(env: Env) -> Result<(), ContractError> {
         let admin: Address = env
             .storage()
@@ -965,6 +1089,17 @@ impl LpLocker {
             return Err(ContractError::TimelockNotElapsed);
         }
         env.storage().instance().remove(&DataKey::UpgradeProposal);
+        // Issue #720: emit upgrade_executed before updating the WASM so the
+        // event is always present in the transaction's footprint regardless
+        // of whether the new code overwrites it.
+        env.events().publish(
+            (
+                Symbol::new(&env, "upgrade_executed"),
+                admin,
+                proposal.new_wasm_hash.clone(),
+            ),
+            (),
+        );
         env.deployer()
             .update_current_contract_wasm(proposal.new_wasm_hash);
         Ok(())
@@ -990,10 +1125,7 @@ impl LpLocker {
     // ── Emergency pause mechanism ─────────────────────────────────────────────
 
     /// Pause the contract, blocking lock creation, withdrawal, extension,
-    /// and beneficiary transfer. Admin functions (propose/execute/cancel
-    /// upgrade, propose/accept admin, pause/unpause itself) and all read-only
-    /// queries remain available while paused — see docs/incident-response.md.
-    /// Admin only.
+    /// and beneficiary transfer. Admin only.
     pub fn pause(env: Env) -> Result<(), ContractError> {
         let admin: Address = env
             .storage()
@@ -1010,8 +1142,7 @@ impl LpLocker {
         Ok(())
     }
 
-    /// Unpause the contract, restoring normal operation.
-    /// Admin only.
+    /// Unpause the contract, restoring normal operation. Admin only.
     pub fn unpause(env: Env) -> Result<(), ContractError> {
         let admin: Address = env
             .storage()

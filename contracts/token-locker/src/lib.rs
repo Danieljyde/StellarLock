@@ -62,6 +62,8 @@ pub enum ContractError {
     NothingToRelease = 5,
     CanOnlyExtend = 6,
     VestingEndBeforeStart = 7,
+    VestingOutsideLockBounds = 25,
+    DuplicateBeneficiary = 26,
     TooFewBeneficiaries = 8,
     TooManyBeneficiaries = 9,
     SharesMustSum10000 = 10,
@@ -79,7 +81,7 @@ pub enum ContractError {
     LockDurationTooLong = 24,
     ContractPaused = 21,
     ExtensionLimitExceeded = 22,
-    InvalidBeneficiary = 25,
+    AlreadyInitialized = 27,
 }
 // ── On-chain types ────────────────────────────────────────────────────────────
 
@@ -185,6 +187,22 @@ fn require_not_paused(env: &Env) -> Result<(), ContractError> {
     Ok(())
 }
 
+fn validate_vesting_bounds(
+    vesting: Option<&Vesting>,
+    created_at: u64,
+    unlock_at: u64,
+) -> Result<(), ContractError> {
+    if let Some(v) = vesting {
+        if v.end <= v.start {
+            return Err(ContractError::VestingEndBeforeStart);
+        }
+        if v.start < created_at || v.start > unlock_at {
+            return Err(ContractError::VestingOutsideLockBounds);
+        }
+    }
+    Ok(())
+}
+
 // ── Contract ──────────────────────────────────────────────────────────────────
 
 #[contract]
@@ -231,11 +249,7 @@ impl TokenLocker {
             return Err(ContractError::RateLimitExceeded);
         }
 
-        if let Some(ref v) = vesting {
-            if v.end <= v.start {
-                return Err(ContractError::VestingEndBeforeStart);
-            }
-        }
+        validate_vesting_bounds(vesting.as_ref(), now, unlock_at)?;
 
         token::Client::new(&env, &token).transfer(
             &creator,
@@ -593,11 +607,7 @@ impl TokenLocker {
             return Err(ContractError::RateLimitExceeded);
         }
 
-        if let Some(ref v) = vesting {
-            if v.end <= v.start {
-                return Err(ContractError::VestingEndBeforeStart);
-            }
-        }
+        validate_vesting_bounds(vesting.as_ref(), now, unlock_at)?;
 
         let n = beneficiaries.len();
         if n < 2 {
@@ -609,9 +619,15 @@ impl TokenLocker {
 
         let mut total_bps: u64 = 0;
         for i in 0..n {
-            let (_, bps) = beneficiaries.get(i).unwrap();
+            let (beneficiary, bps) = beneficiaries.get(i).unwrap();
             if bps == 0 {
                 return Err(ContractError::SharesMustSum10000);
+            }
+            for j in 0..i {
+                let (existing, _) = beneficiaries.get(j).unwrap();
+                if beneficiary == existing {
+                    return Err(ContractError::DuplicateBeneficiary);
+                }
             }
             total_bps += bps;
         }
@@ -644,6 +660,9 @@ impl TokenLocker {
                     .ok_or(ContractError::AmountOverflow)?;
                 amount
             };
+            if share_amount <= 0 {
+                return Err(ContractError::AmountMustBePositive);
+            }
             let lock_id = if i == 0 { group_id } else { get_id(&env) };
             let lock = Lock {
                 id: lock_id,
@@ -712,6 +731,49 @@ impl TokenLocker {
             RATE_LIMIT_TTL_LEDGERS,
             RATE_LIMIT_TTL_LEDGERS,
         );
+
+        // Update TVL and global stats — mirrors the accounting in create_lock
+        // and lp-locker's create_split_lock. This was previously missing from
+        // token-locker's create_split_lock (issue #717): total_amount was
+        // transferred in but never added to TotalLocked / GlobalLockCount,
+        // causing withdraw() to decrement amounts that were never credited.
+        let current_tvl: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TotalLocked(token.clone()))
+            .unwrap_or(0);
+        let new_tvl = current_tvl
+            .checked_add(total_amount)
+            .ok_or(ContractError::AmountOverflow)?;
+        if current_tvl == 0 {
+            let unique_count: u64 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::UniqueTokenCount)
+                .unwrap_or(0);
+            let new_unique_count = unique_count
+                .checked_add(1)
+                .ok_or(ContractError::AmountOverflow)?;
+            env.storage()
+                .persistent()
+                .set(&DataKey::UniqueTokenCount, &new_unique_count);
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::TotalLocked(token.clone()), &new_tvl);
+        // Count every sub-lock individually so global stats stay consistent
+        // with create_lock (one counter increment per lock record).
+        let lock_count: u64 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::GlobalLockCount)
+            .unwrap_or(0);
+        let new_lock_count = lock_count
+            .checked_add(n as u64)
+            .ok_or(ContractError::AmountOverflow)?;
+        env.storage()
+            .persistent()
+            .set(&DataKey::GlobalLockCount, &new_lock_count);
 
         // Group-level summary only — each child's own state was already
         // published above via its individual `lock_created` event.
@@ -832,16 +894,29 @@ impl TokenLocker {
     // ── Upgrade mechanism (7-day timelock) ───────────────────────────────────
 
     /// Must be called once after deployment to set the admin.
-    /// Panics if admin is already set.
-    pub fn init(env: Env, admin: Address) {
+    ///
+    /// Returns `ContractError::AlreadyInitialized` if called a second time,
+    /// instead of panicking, so callers can distinguish "already initialised"
+    /// from other errors programmatically. (Issue #722)
+    ///
+    /// Emits a `contract_initialized` event so indexers can record the exact
+    /// deployment timestamp on-chain. (Issue #721)
+    pub fn init(env: Env, admin: Address) -> Result<(), ContractError> {
         if env.storage().instance().has(&DataKey::Admin) {
-            panic!("already initialised");
+            return Err(ContractError::AlreadyInitialized);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
+        // Issue #721: emit an on-chain event so indexers can record the
+        // deployment timestamp and admin address without relying on tx metadata.
+        env.events().publish(
+            (Symbol::new(&env, "contract_initialized"), admin),
+            (),
+        );
+        Ok(())
     }
 
     /// Admin proposes a WASM upgrade. Executable only after 7 days.
@@ -853,6 +928,7 @@ impl TokenLocker {
             .ok_or(ContractError::NotInitialized)?;
         admin.require_auth();
         let execute_after = env.ledger().timestamp() + UPGRADE_DELAY;
+        let event_wasm_hash = new_wasm_hash.clone();
         let proposal = UpgradeProposal {
             new_wasm_hash,
             execute_after,
@@ -863,12 +939,21 @@ impl TokenLocker {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_THRESHOLD, INSTANCE_BUMP);
-        env.events()
-            .publish((Symbol::new(&env, "upgrade_proposed"), execute_after), ());
+        env.events().publish(
+            (
+                Symbol::new(&env, "upgrade_proposed"),
+                execute_after,
+                event_wasm_hash,
+            ),
+            (),
+        );
         Ok(())
     }
 
     /// Execute a previously proposed upgrade after the timelock has elapsed.
+    ///
+    /// Emits an `upgrade_executed` event with the new WASM hash so indexers
+    /// and monitoring tools can track contract upgrades on-chain. (Issue #720)
     pub fn execute_upgrade(env: Env) -> Result<(), ContractError> {
         let admin: Address = env
             .storage()
@@ -885,6 +970,17 @@ impl TokenLocker {
             return Err(ContractError::TimelockNotElapsed);
         }
         env.storage().instance().remove(&DataKey::UpgradeProposal);
+        // Issue #720: emit upgrade_executed before updating the WASM so the
+        // event is always present in the transaction's footprint regardless
+        // of whether the new code overwrites it.
+        env.events().publish(
+            (
+                Symbol::new(&env, "upgrade_executed"),
+                admin,
+                proposal.new_wasm_hash.clone(),
+            ),
+            (),
+        );
         env.deployer()
             .update_current_contract_wasm(proposal.new_wasm_hash);
         Ok(())

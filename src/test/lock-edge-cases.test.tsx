@@ -8,6 +8,9 @@ import { mockWallet, VALID_CONTRACT_ADDRESS } from "./mocks"
 
 vi.mock("@/hooks/useWallet", () => ({
   useWallet: () => mockWallet,
+}))
+
+vi.mock("@/hooks/WalletProvider", () => ({
   WalletProvider: ({ children }: { children: ReactNode }) => children,
 }))
 
@@ -16,14 +19,6 @@ vi.mock("@/lib/token-locker", async (importOriginal) => {
   return {
     ...actual,
     createTokenLock: vi.fn().mockResolvedValue({ id: "1", txHash: "abc" }),
-  }
-})
-
-vi.mock("@/lib/stellar", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("@/lib/stellar")>()
-  return {
-    ...actual,
-    submitTokenApproval: vi.fn().mockResolvedValue(undefined),
   }
 })
 
@@ -37,15 +32,6 @@ vi.mock("@/hooks/useTokenBalanceSWR", () => ({
     isRevalidating: false,
     refetch: vi.fn(),
     clear: vi.fn(),
-  })),
-}))
-
-vi.mock("@/hooks/useLocks", () => ({
-  useTokenAllowance: vi.fn(() => ({
-    data: 10000,
-    loading: false,
-    error: null,
-    reload: vi.fn(),
   })),
 }))
 
